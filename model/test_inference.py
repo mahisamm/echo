@@ -2,18 +2,26 @@ import os
 import requests
 
 def test_api():
-    url = "http://localhost:8000/detect"
-    
+    # Override with ECHO_API_URL when the backend is not on the default port
+    base_url = os.environ.get("ECHO_API_URL", "http://127.0.0.1:8010")
+    url = f"{base_url}/detect"
+
     # Find first siren or glass breaking file dynamically
     import glob
-    processed_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "processed"))
-    
-    test_files = glob.glob(os.path.join(processed_dir, "siren", "*.wav"))
+    data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
+
+    test_files = []
+    # Prefer real ingested audio, fall back to the synthetic generator output
+    for source in ("processed", "synthetic"):
+        for class_name in ("siren", "glass_breaking"):
+            test_files = glob.glob(os.path.join(data_dir, source, class_name, "*.wav"))
+            if test_files:
+                break
+        if test_files:
+            break
+
     if not test_files:
-        test_files = glob.glob(os.path.join(processed_dir, "glass_breaking", "*.wav"))
-        
-    if not test_files:
-        print("No processed test files available yet.")
+        print("No test files available yet. Run generate_synthetic_data.py or prepare_dataset.py first.")
         return
         
     test_file = test_files[0]

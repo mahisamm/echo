@@ -1,4 +1,16 @@
 import os
+import tempfile
+
+# Must be set before `main` (and, through it, `db`) is first imported anywhere
+# in the test process: db.DB_PATH is read once at import time, so setting this
+# only inside main.py's own import would be too late once db is cached in
+# sys.modules. Without an isolated path here, this test writes into the real
+# dev backend/echo_backend.db, and cross-file test runs become order-dependent
+# on whichever test module imports `db` first.
+os.environ.setdefault(
+    "ECHO_DB_PATH", os.path.join(tempfile.mkdtemp(prefix="echo_test_backend_db_"), "test.db")
+)
+
 from fastapi.testclient import TestClient
 from main import app
 
@@ -57,7 +69,7 @@ def test_endpoints():
     print(f"-> Contacts Retrieved Successfully. Found {len(contacts)} contacts.")
 
     # 5. Test DELETE /contacts/{contact_id}
-    response = client.delete(f"/contacts/{contact_id}")
+    response = client.delete(f"/contacts/{contact_id}?user_id=test_user_123")
     assert response.status_code == 200
     print("-> Contact Deleted Successfully.")
 
@@ -67,7 +79,12 @@ def test_endpoints():
     contacts_after = response.json()
     assert len(contacts_after) == 0, f"Expected 0 contacts, got {len(contacts_after)}"
 
-    # 6. Test GET /nearby (OSM Proxy/Fallback)
+    # 6. Clear only this user's event history.
+    response = client.delete("/events/test_user_123")
+    assert response.status_code == 200
+    assert client.get("/events/test_user_123").json() == []
+
+    # 7. Test GET /nearby (OSM Proxy/Fallback)
     response = client.get("/nearby?lat=37.7749&lng=-122.4194&type=hospital")
     assert response.status_code == 200
     nearby_data = response.json()

@@ -1,24 +1,24 @@
-Write-Host "Starting UrbanSound8K Ingestion (This will take a while)..."
-python ingest_real_datasets.py --download-urbansound
+Write-Host "Preparing dataset (real ESC-50/UrbanSound8K where available, labeled synthetic fallback otherwise)..."
+python prepare_dataset.py
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Ingestion failed!"
+    Write-Error "Dataset preparation failed!"
     exit $LASTEXITCODE
 }
 
-Write-Host "Generating Metadata..."
-python generate_real_metadata.py
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Metadata generation failed!"
-    exit $LASTEXITCODE
-}
-
-Write-Host "Starting Model Training..."
-python train.py
+Write-Host "Training YAMNet transfer-learning head..."
+python train_yamnet.py
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Training failed!"
+    exit $LASTEXITCODE
+}
+
+Write-Host "Evaluating on the held-out test split..."
+python evaluate.py
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Evaluation failed!"
     exit $LASTEXITCODE
 }
 

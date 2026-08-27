@@ -1,56 +1,65 @@
-import os
-import torch
-from model import EchoTransformer
+"""Exports the combined YAMNet + hazard-head model to OpenVINO IR.
 
-def export_openvino():
-    print("Exporting Echo Transformer to OpenVINO Intermediate Representation (IR)...")
-    
-    model_path = "checkpoints/best_model.pth"
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model checkpoint not found at: {model_path}. Please run train.py first.")
-        
+Ported from the removed PyTorch/CNN-Transformer export path to the current
+TensorFlow/YAMNet model (see export_tflite.py for the combined-model
+construction this reuses). Kept because laptop-side OpenVINO benchmarking on
+Intel iGPU hardware is a documented differentiator (TIER_TABLE.md #12), not
+because it is required for the mobile app itself.
+"""
+
+import os
+
+import tensorflow as tf
+
+from model_profiles import REAL_PROFILE_NAME, get_profile
+from train_yamnet import _paths_for
+from export_tflite import build_combined_model
+
+
+def export_openvino(profile=REAL_PROFILE_NAME):
+    profile = get_profile(profile) if isinstance(profile, str) else profile
+    checkpoint_path = _paths_for(profile)["checkpoint"]
+    print("Exporting combined YAMNet + hazard-head model to OpenVINO IR (profile: {})...".format(profile.name))
+
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            "Trained head not found at: {}. Please run train_yamnet.py --profile {} first.".format(
+                checkpoint_path, profile.name
+            )
+        )
+
     try:
         import openvino as ov
     except ImportError:
         print("openvino package not found. Installing now...")
         os.system("pip install openvino")
         import openvino as ov
-        
-    # Load model
-    device = torch.device("cpu")
-    model = EchoTransformer(num_classes=8)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-    
-    # Trace model with dummy input (augmented 192 frequency bins)
-    dummy_input = torch.randn(1, 1, 192, 63)
-    
-    # Export PyTorch model to ONNX first to simplify/flatten internal Transformer assertions
-    onnx_path = "checkpoints/echo_model.onnx"
-    print("Exporting PyTorch model to ONNX as intermediate step...")
-    torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_path,
-        export_params=True,
-        opset_version=14,
-        do_constant_folding=True,
-        input_names=['input'],
-        output_names=['output']
-    )
-    
-    # Convert ONNX model representation to OpenVINO
-    print("Converting ONNX representation to OpenVINO IR...")
-    ov_model = ov.convert_model(onnx_path)
-    
-    # Save openvino model files (.xml and .bin)
-    output_dir = "checkpoints/openvino"
+
+    head_model = tf.keras.models.load_model(checkpoint_path)
+    combined_model = build_combined_model(head_model)
+
+    suffix = "" if profile.name == REAL_PROFILE_NAME else "_" + profile.name
+
+    # Passing the in-memory Keras object directly hits an OpenVINO/TF
+    # version-introspection bug in this environment (openvino 2026.3 against
+    # tensorflow 2.21); converting from an on-disk SavedModel is the more
+    # robust path and is what OpenVINO's own docs recommend for TF models.
+    saved_model_dir = "checkpoints/echo_yamnet_saved_model{}".format(suffix)
+    combined_model.export(saved_model_dir)
+    ov_model = ov.convert_model(saved_model_dir)
+
+    output_dir = "checkpoints/openvino{}".format(suffix)
     os.makedirs(output_dir, exist_ok=True)
-    ov.save_model(ov_model, os.path.join(output_dir, "echo_model.xml"))
-    
+    ov.save_model(ov_model, os.path.join(output_dir, "echo_yamnet_model.xml"))
+
     print(f"OpenVINO IR model successfully saved under: {output_dir}/")
-    print(f"  - XML file: {output_dir}/echo_model.xml")
-    print(f"  - BIN file: {output_dir}/echo_model.bin")
+    print(f"  - XML file: {output_dir}/echo_yamnet_model.xml")
+    print(f"  - BIN file: {output_dir}/echo_yamnet_model.bin")
+
 
 if __name__ == "__main__":
-    export_openvino()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", default=REAL_PROFILE_NAME)
+    args = parser.parse_args()
+    export_openvino(profile=args.profile)

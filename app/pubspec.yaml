@@ -15,6 +15,7 @@ dependencies:
   record: ^5.0.4              # For session-based microphone rolling buffers
   path_provider: ^2.1.1       # For saving temporary audio chunks locally
   shared_preferences: ^2.2.2  # For storing emergency contacts locally
+  url_launcher: ^6.2.5        # For the user-initiated tel:112 emergency handoff
 
 dev_dependencies:
   flutter_test:

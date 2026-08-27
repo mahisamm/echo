@@ -34,17 +34,20 @@ it implies is real — this misrepresents the project and will fall apart under 
 
 ## Core Pipeline (Tier 1 — must work end-to-end)
 
-Microphone → rolling audio buffer (2-5s) → log-mel spectrogram → CRNN model (two-pass:
-fast/low-res pass, then re-inference on longer/higher-res window as "verification") →
+Microphone → rolling audio buffer (2-5s) → YAMNet transfer-learning classifier (two-pass:
+fast/short pass, then re-inference on longer window as "verification") →
 heuristic context/risk scorer → risk level (NORMAL/SUSPICIOUS/POSSIBLE DANGER/HIGH-RISK) →
 rule-based guidance lookup → map/nearby-places display → alert screen with action buttons.
+(See DECISIONS_LOG.md entry #8: this replaced an earlier from-scratch CNN-Transformer.)
 
 ## What We Deliberately Cut From the Original Spec (and why)
 
 - No true 24/7 background OS-level monitoring — session-based (app open/foreground service)
   monitoring instead. See DECISIONS_LOG.md entry #1.
-- No AST/PANNs/BEATs/CLAP as a second model — same CRNN run twice at different
-  window sizes/thresholds simulates "two-stage verification." Entry #2.
+- No AST/PANNs/BEATs/CLAP as a second model — same YAMNet-based classifier run twice at
+  different window sizes/thresholds simulates "two-stage verification." Entry #2 (superseded
+  by entry #8, which replaced the from-scratch classifier itself with a fine-tuned YAMNet head
+  — the "no second heavy model" reasoning still holds).
 - No full ASR (Whisper) — small constrained keyword-spotter for ~6 target phrases only. Entry #3.
 - No real nearby-device networking — Tier 3, scripted responses in Demo Mode only. Entry #4.
 - No pruning/QAT — post-training dynamic-range quantization (TFLite) + OpenVINO IR export

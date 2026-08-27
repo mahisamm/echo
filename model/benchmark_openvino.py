@@ -4,8 +4,8 @@ import numpy as np
 
 def benchmark():
     print("================ OPENVINO BENCHMARK ================")
-    xml_path = "checkpoints/openvino/echo_model.xml"
-    bin_path = "checkpoints/openvino/echo_model.bin"
+    xml_path = "checkpoints/openvino/echo_yamnet_model.xml"
+    bin_path = "checkpoints/openvino/echo_yamnet_model.bin"
     
     if not os.path.exists(xml_path):
         raise FileNotFoundError(f"OpenVINO model files not found at: {xml_path}. Run export_openvino.py first.")
@@ -54,8 +54,10 @@ def benchmark():
     input_layer = compiled_model.input(0)
     output_layer = compiled_model.output(0)
     
-    # Dummy input representing 2-second spectrogram (1 batch, 1 channel, 192 mels, 63 frames)
-    dummy_input = np.random.randn(1, 1, 192, 63).astype(np.float32)
+    # Dummy input representing a 2-second raw waveform at 16kHz -- YAMNet
+    # does its own internal framing/spectrogram extraction, so the exported
+    # graph takes raw audio samples directly, not a precomputed spectrogram.
+    dummy_input = np.random.randn(32000).astype(np.float32)
     
     # Warm-up runs
     print("\nPerforming warm-up runs...")

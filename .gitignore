@@ -21,6 +21,8 @@ backend/temp/
 model/checkpoints/
 model/esc50_temp.zip
 model/esc50_temp_dir/
+model/*.tar.gz
+model/urbansound8k_temp_dir/
 model/data/
 
 # Flutter specific
@@ -58,3 +60,15 @@ cloned_repos/
 reports/*.json
 
 
+
+# Local run logs
+server.log
+server.err.log
+
+# Backend secrets / runtime state
+backend/.env
+backend/evidence/
+
+# Demo model artifacts
+model/data/raw/firecrackers/
+.gstack/

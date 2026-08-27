@@ -1,110 +1,121 @@
-import os
-import torch
-import torchaudio
+import logging
+
 import numpy as np
-import soundfile as sf
-import torch.nn.functional as F
-from model import EchoTransformer
-from dataset import PREPROCESSING_CONFIG, CLASS_MAPPING, get_augmented_spectrogram
+import tensorflow as tf
+
+from audio_classes import MEDIA_CONTEXT_THRESHOLD
+from model_profiles import REAL_PROFILE, get_profile
+from yamnet_features import load_yamnet, load_waveform, embed_waveform, media_context_score
+
+logger = logging.getLogger(__name__)
+
 
 class TwoPassDetector:
-    def __init__(self, model_path, config=PREPROCESSING_CONFIG):
-        self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = EchoTransformer(num_classes=8).to(self.device)
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-        self.model.eval()
-        
-        # Invert class mapping for human readable labels
-        self.idx_to_class = {v: k for k, v in CLASS_MAPPING.items()}
-        
-    def _extract_log_mel(self, waveform):
-        # Extract mel spectrogram using torchaudio
-        mel_spectrogram = torchaudio.transforms.MelSpectrogram(
-            sample_rate=self.config["sample_rate"],
-            n_fft=self.config["n_fft"],
-            hop_length=self.config["hop_length"],
-            n_mels=self.config["n_mels"]
-        )
-        mel_spec = mel_spectrogram(waveform)
-        log_mel_spec = torchaudio.transforms.AmplitudeToDB()(mel_spec)
-        return log_mel_spec # (1, 64, T)
+    """Two-pass hazard detector over a frozen YAMNet backbone.
 
-    def preprocess_audio(self, audio_np, sr, target_seconds):
-        """
-        Preprocesses a raw numpy array to the model input format
-        """
-        # Ensure mono
-        if audio_np.ndim > 1:
-            audio_np = np.mean(audio_np, axis=1)
-            
-        waveform = torch.from_numpy(audio_np).float().unsqueeze(0) # (1, num_samples)
-        
-        # Resample if needed using torchaudio's band-limited sinc interpolation (prevents aliasing)
-        if sr != self.config["sample_rate"]:
-            waveform = torchaudio.functional.resample(waveform, orig_freq=sr, new_freq=self.config["sample_rate"])
-        
-        # Fit to target window length (pad or truncate)
-        target_length = int(self.config["sample_rate"] * target_seconds)
-        if waveform.shape[1] > target_length:
-            waveform = waveform[:, :target_length]
-        elif waveform.shape[1] < target_length:
-            padding = target_length - waveform.shape[1]
-            waveform = torch.nn.functional.pad(waveform, (0, padding))
-            
-        # Extract Log-Mel and compute spatial derivative augmented spectrogram
-        log_mel = self._extract_log_mel(waveform) # (1, 64, T)
-        augmented = get_augmented_spectrogram(log_mel) # (1, 192, T)
-        return augmented.unsqueeze(0).to(self.device) # (1, 1, 192, T)
+    The class taxonomy is no longer global: a detector is bound to a
+    :class:`model_profiles.ModelProfile` (``real`` or ``demo``), because the
+    demo head has one extra class and its own alias map. Passing a bare
+    checkpoint path still works and defaults to the production profile, so
+    existing callers are unaffected.
+    """
 
-    def run_pass_1(self, audio_2s_np, sr):
+    def __init__(self, head_model_path=None, profile=None, yamnet=None):
+        if isinstance(profile, str):
+            profile = get_profile(profile)
+        self.profile = profile or REAL_PROFILE
+        self.head_model_path = head_model_path or self.profile.checkpoint_path
+        # The YAMNet backbone is identical for every profile and costs ~30s
+        # and a few hundred MB to load, so callers holding several detectors
+        # should share one instance instead of loading it per head.
+        self.yamnet = yamnet if yamnet is not None else load_yamnet()
+        self.head = tf.keras.models.load_model(self.head_model_path)
+        self.idx_to_class = self.profile.idx_to_class
+        self.class_mapping = self.profile.class_mapping
+
+        head_outputs = int(self.head.output_shape[-1])
+        if head_outputs != self.profile.num_classes:
+            # A head whose output width does not match its profile's taxonomy
+            # would silently mislabel every prediction (index 8 read as index
+            # 7, and so on) -- an unacceptable failure mode for a safety
+            # classifier, so refuse to run instead.
+            raise ValueError(
+                "Checkpoint {} outputs {} classes but profile '{}' defines {}.".format(
+                    self.head_model_path, head_outputs, self.profile.name,
+                    self.profile.num_classes,
+                )
+            )
+
+    def _classify(self, audio_np, sr):
+        waveform = load_waveform((audio_np, sr))
+        embedding, frame_scores = embed_waveform(self.yamnet, waveform)
+        probs = self.head.predict(embedding[np.newaxis, :], verbose=0)[0]
+        acoustic_media_score = media_context_score(frame_scores)
+        return probs, acoustic_media_score
+
+    def resolve_class(self, class_name):
+        """Head-native class -> the class the risk scorer and safety policy use.
+
+        For the demo profile this is where ``firecracker`` becomes
+        ``gunshot``; the caller keeps the raw class for the record.
         """
-        Pass 1: Primary detection with a 2-second window
-        Threshold: 0.50
+        return self.profile.resolve_class(class_name)
+
+    def run_pass_1(self, audio_2s_np, sr, threshold=None):
         """
-        input_tensor = self.preprocess_audio(audio_2s_np, sr, target_seconds=2.0)
-        with torch.no_grad():
-            outputs = self.model(input_tensor)
-            probs = F.softmax(outputs, dim=1)[0]
-            
-        # Find highest non-normal hazard class probability
+        Pass 1: Primary detection with a 2-second window.
+        Threshold: the profile default (0.50 real / 0.55 demo) unless the
+        caller passes one.
+        Also returns an automatically-detected acoustic media-context score
+        (see audio_classes.MEDIA_CONTEXT_AUDIOSET_INDICES) as weak supporting
+        evidence, distinct from the user/platform-reported media_playback
+        toggle -- it never overrides that toggle, only supplements it.
+        """
+        if threshold is None:
+            threshold = self.profile.default_pass1_threshold
+        probs, acoustic_media_score = self._classify(audio_2s_np, sr)
+
         max_prob = 0.0
         candidate_idx = 0
-        
-        # idx 0 is "normal"
-        for idx in range(1, 8):
-            prob = probs[idx].item()
-            if prob > max_prob:
-                max_prob = prob
+        for idx in range(1, len(self.idx_to_class)):
+            if probs[idx] > max_prob:
+                max_prob = float(probs[idx])
                 candidate_idx = idx
-                
-        # Print probabilities for debugging
-        print("\n--- Pass 1 Detection Probabilities ---")
-        for i in range(8):
-            print(f"  {self.idx_to_class[i]}: {probs[i].item():.4f}")
-            
-        candidate_class = self.idx_to_class[candidate_idx]
-        print(f"  Selected candidate: {candidate_class if max_prob >= 0.50 else 'normal'} (max_hazard_prob={max_prob:.4f})")
-        
-        # If candidate exceeds 0.50, return it
-        if max_prob >= 0.50:
-            return True, candidate_class, max_prob
-            
-        # Return normal class
-        return False, "normal", probs[0].item()
 
-    def run_pass_2(self, audio_5s_np, sr, target_class):
+        if logger.isEnabledFor(logging.DEBUG):
+            probs_str = ", ".join(
+                "{}={:.4f}".format(self.idx_to_class[i], probs[i])
+                for i in range(len(self.idx_to_class))
+            )
+            logger.debug("Pass 1 probabilities (%s): %s", self.profile.name, probs_str)
+
+        candidate_class = self.idx_to_class[candidate_idx]
+        logger.debug(
+            "Pass 1 selected candidate: %s (max_hazard_prob=%.4f, acoustic_media_score=%.4f)",
+            candidate_class if max_prob >= threshold else "normal", max_prob, acoustic_media_score,
+        )
+
+        if max_prob >= threshold:
+            return True, candidate_class, max_prob, acoustic_media_score
+
+        return False, "normal", float(probs[0]), acoustic_media_score
+
+    def run_pass_2(self, audio_5s_np, sr, target_class, threshold=None):
         """
-        Pass 2: Verification detection centered around candidate event (5-second window)
-        Threshold: 0.70
+        Pass 2: Verification detection centered around candidate event (5-second window).
+        Threshold: the profile default (0.70 real / 0.60 demo) unless the
+        caller passes one.
         """
-        input_tensor = self.preprocess_audio(audio_5s_np, sr, target_seconds=5.0)
-        with torch.no_grad():
-            outputs = self.model(input_tensor)
-            probs = F.softmax(outputs, dim=1)[0]
-            
-        target_idx = CLASS_MAPPING.get(target_class, 0)
-        verification_prob = probs[target_idx].item()
-        
-        is_verified = verification_prob >= 0.70
-        return is_verified, verification_prob
+        if threshold is None:
+            threshold = self.profile.default_pass2_threshold
+
+        probs, acoustic_media_score = self._classify(audio_5s_np, sr)
+        target_idx = self.class_mapping.get(target_class, 0)
+        verification_prob = float(probs[target_idx])
+
+        is_verified = verification_prob >= threshold
+        return is_verified, verification_prob, acoustic_media_score
+
+    @staticmethod
+    def acoustic_media_signal_active(acoustic_media_score):
+        return acoustic_media_score >= MEDIA_CONTEXT_THRESHOLD

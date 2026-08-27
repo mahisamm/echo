@@ -66,6 +66,31 @@ Affects: ARCHITECTURE.md
 
 <!-- Add new entries below this line as the project progresses. -->
 
+### #9 — Real-audio augmentation to close the macro-F1 gate; escalation location + rate limiting
+Date: August 27, 2026
+Decided by: team (AI-assisted)
+What: `prepare_dataset.py` now generates label-preserving augmented variants (pitch shift, time
+stretch, additive noise, gain jitter, one early reflection) of every real ESC-50 recording for
+explosion/glass_breaking/fire_alarm/siren/shouting, source-disjointly split so an augmented clip
+always lands in the same split as its source recording -- never both train and test. Macro F1
+went 0.85 -> 0.9508 (clears the 0.95 gate for the first time); `synthetic_generated` gunshot/
+scream sample counts and generator realism were also increased, but those two classes remain
+100% synthetic (no augmentation possible with zero real source clips). Fixed a real bug: three
+scripts (`evaluate.py`, `export_tflite.py`, `export_openvino.py`) had been `ImportError`-broken
+since the profile refactor (entry #8) and silently uncovered by the test suite -- both are now
+fixed and covered by a live run, not just an import check. Also added: `backend/geocode.py`
+(OSM Nominatim reverse geocoding for the escalation call/Telegram location line, no API key),
+a per-user rate limit on `/escalation/test` (previously uncapped -- unlike `/incidents`, it
+skipped `escalation_gate()`'s cooldown entirely), and a redesigned `backend/static/` dashboard
+(risk-level color coding, an animated escalation countdown ring, toast notifications, a "send a
+real test alert" button, and full per-contact Telegram/priority/channel-opt-out fields that were
+previously Flutter-app-only). See `reports/evaluation_report.txt` for the exact remaining release
+blockers -- explosion/fire_alarm/normal precision, explosion recall, and gunshot/scream's
+synthetic-only status are all still honestly gated, not overridden.
+Affects: model/prepare_dataset.py, model/generate_synthetic_data.py, model/evaluate.py,
+model/export_tflite.py, model/export_openvino.py, backend/geocode.py (new), backend/emergency.py,
+backend/notifiers.py, backend/emergency_routes.py, backend/static/, LOCAL_SETUP.md.
+
 ### #6 — CNN-Transformer with Spatial Derivative Features
 Date: July 24, 2026
 Decided by: team
@@ -79,4 +104,31 @@ Decided by: team
 What: Bypassed the 5-second Pass 2 recording delay for transient classes (gunshot, explosion, glass breaking), triggering instant emergency warnings on Pass 1.
 Why: Gunshots and explosions are non-repeating impulses that do not persist into a subsequent recording block. Requiring a second recording block is unsafe for single-event threats.
 Affects: backend/main.py, backend/static/app.js
+
+### #8 — Replaced from-scratch CNN-Transformer with a fine-tuned YAMNet head
+Date: August 17, 2026
+Decided by: team (AI-assisted)
+What: Deleted model.py (CNN-Transformer), dataset.py (log-mel + Sobel/Laplacian preprocessing),
+and the from-scratch train.py. Replaced with model/train_yamnet.py: a frozen, pretrained
+YAMNet backbone (TF-Hub) + a small trainable classifier head on mean+max-pooled embeddings.
+Why: Real-audio coverage per class is thin (zero to ~740 clips) and a transformer trained from
+zero on that little real data either overfits or fails to generalize. YAMNet was pretrained on
+~2M AudioSet clips, so the head needs far fewer real examples to generalize well. This also
+solves the CNN-Transformer's permanently-blocked TFLite export (ai-edge-torch has no build for
+this Python version; the onnx-tf fallback is unmaintained/incompatible) since a Keras model
+converts to TFLite/OpenVINO natively. Measured result on the same expanded real+labeled-
+synthetic dataset: macro F1 0.82 (CNN-Transformer) -> 0.85 (YAMNet head) — a real improvement,
+not release-ready either way (see reports/evaluation_report.txt, evaluation_gates.py).
+Also added: an automatic "acoustic media-context" signal read from YAMNet's own general
+AudioSet predictions (Television, Music, Soundtrack music, etc.), feeding the existing
+media_playback/safety_policy pipeline as a new, weaker context_source tier
+("acoustic_signal") alongside the pre-existing manual/platform_signal tiers — this is what
+makes the "gunshot during a movie" scenario resolve automatically, not only via the manual
+toggle. It never overrides an explicit signal and never silently drops a verified event.
+Affects: model/ (new: audio_classes.py, yamnet_features.py, train_yamnet.py; rewritten:
+two_pass_detector.py, evaluate.py, export_tflite.py, export_openvino.py, benchmark_openvino.py,
+safety_policy.py; removed: model.py, dataset.py, train.py, generate_real_metadata.py,
+ingest_real_datasets.py), backend/main.py, docs/ARCHITECTURE.md, docs/YAMNET_MODEL.md
+(replaces docs/TRANSFORMER_MODEL.md), docs/TIER_TABLE.md, docs/PROJECT_BRIEF.md,
+requirements.txt, app/lib/screens/settings_screen.dart, backend/static/index.html.
 

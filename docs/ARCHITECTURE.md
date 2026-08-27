@@ -23,7 +23,7 @@
     /data                    <- raw + processed datasets (gitignored, documented in DATASET_TABLE.md)
     /notebooks               <- exploration only, nothing production depends on notebooks
     train.py
-    model.py                 <- CRNN definition, single source of truth for architecture
+    model.py                 <- CNN-Transformer definition, single source of truth for architecture
     dataset.py               <- data loading, augmentation
     export_tflite.py
     export_openvino.py
@@ -39,33 +39,44 @@
   /reports
 ```
 
-## Model Architecture (CRNN — Tier 1, Person A's deep-dive)
+## Model Architecture (YAMNet transfer learning — Tier 1, Person A's deep-dive)
 
-**Input:** log-mel spectrogram, 64 mel bins, computed from 2-5s @ 16kHz mono audio.
+**Input:** raw 16kHz mono waveform, 2-5s. See `docs/YAMNET_MODEL.md` for the full writeup and
+`docs/DECISIONS_LOG.md` entry #8 for why this replaced the original from-scratch
+CNN-Transformer.
 
-**Default architecture (subject to update once papers are read):**
+**Architecture:**
 ```
-Input: (batch, 1, 64 mel bins, T time frames)
-Conv2D(16 filters, 3x3) -> BatchNorm -> ReLU -> MaxPool(2x2)
-Conv2D(32 filters, 3x3) -> BatchNorm -> ReLU -> MaxPool(2x2)
-Conv2D(64 filters, 3x3) -> BatchNorm -> ReLU -> MaxPool(2x2)
-Reshape (collapse freq axis into channel dim, keep time axis)
-GRU(hidden=64, 1 layer, unidirectional)
-Dense(num_classes) -> Softmax
+Waveform (16kHz mono)
+-> YAMNet (frozen, pretrained on ~2M AudioSet clips, TF-Hub "google/yamnet/1")
+   -> per-frame 1024-d embeddings (0.96s windows, 0.48s hop) + 521-class AudioSet scores
+-> mean-pool embeddings across frames, max-pool embeddings across frames, concatenate (2048-d)
+-> BatchNorm -> Dense(128, L2) -> Dropout(0.3) -> Dense(8, softmax)
 ```
+Only the final block is trained; YAMNet itself stays frozen. This trades from-scratch model
+capacity for sample efficiency, which matters when real per-class audio ranges from zero to a
+few hundred clips.
 
 **Two-pass "verification" (replaces separate Model A/B):**
 - Pass 1 ("Primary"): 2s window, threshold 0.5 to trigger Pass 2.
 - Pass 2 ("Verification"): 5s window centered on the same event, threshold 0.7 for final
   hazard confirmation. Report both numbers on the alert screen exactly as originally specced.
 
-**Training:** PyTorch. Cross-entropy loss. Augmentation: additive background noise (from
-UrbanSound8K's own "street_music"/"engine_idling" as noise sources), time-shift, gain
-variation, +/- reverb if time allows.
+**Automatic media-context signal:** each pass also reads YAMNet's own general AudioSet
+predictions (Television, Music, Soundtrack music, Radio, etc.) as a weak, automatically
+detected acoustic signal that a movie/TV/game is likely playing — feeding the same
+`media_playback` context input as the manual toggle, at a distinct, lower-reliability tier
+(`context_source="acoustic_signal"`). See `model/audio_classes.py` and
+`model/safety_policy.py`. It only ever adds evidence; it never overrides an explicit `False`,
+and conflicting evidence (sudden motion, a repeat hazard sequence) still forces an alert.
 
-**Export:** `export_tflite.py` produces INT8 dynamic-range-quantized `.tflite` for the mobile
-app. `export_openvino.py` produces IR format for laptop-side latency/size benchmarking
-(Person A's OpenVINO-on-Arc-iGPU story — this is the differentiator, don't skip it).
+**Training:** TensorFlow/Keras. Class-weighted (inverse-frequency) cross-entropy — "normal"
+outnumbers hazard classes roughly 15-to-1 in the current dataset.
+
+**Export:** `export_tflite.py` builds one combined graph (YAMNet + pooling + head) and converts
+it directly to a quantized `.tflite` (~3.5MB, verified to run real inference). `export_openvino.py`
+produces IR format for laptop-side latency/size benchmarking (Person A's OpenVINO-on-Arc-iGPU
+story — this is the differentiator, don't skip it).
 
 ## Context/Risk Scorer (Tier 1, heuristic — Person C)
 

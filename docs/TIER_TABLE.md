@@ -6,13 +6,13 @@
 
 | # | Feature | Tier | Notes |
 |---|---------|------|-------|
-| 1 | Hazardous sound classification (CRNN) | 1 | Real, trained, evaluated with confusion matrix |
+| 1 | Hazardous sound classification (YAMNet transfer-learning head) | 1 | Real locally; real-world performance claims require the readiness gates to pass |
 | 2 | Two-pass verification (same model, two windows) | 1 | Real; replaces separate 2nd model |
 | 3 | Heuristic context/risk scorer | 1 | Real; documented weighted formula |
 | 4 | Temporal event sequence analysis | 1 | Real; short rolling event history window |
 | 5 | Rule-based emergency guidance | 1 | Real; static lookup table per hazard type |
 | 6 | Maps/nearby police-hospital lookup | 1 | Real; Places API or OSM Overpass |
-| 7 | Demo Mode (9 scenarios) | 1 | Real; must work live for panel |
+| 7 | Demo Mode (8-class WAV injection + live mic, covers the 6 required scenarios) | 1 | Real; runs the actual /detect pipeline on real or labeled-synthetic clips, must work live for panel. Implemented in the browser dashboard (`backend/static/`); the Flutter app's Demo tab mirrors the same real pipeline call. |
 | 8 | Alert screen, History, Contacts, Settings UI | 1 | Real |
 | 9 | Session-based (foreground) mic monitoring | 1 | Real, scoped down from 24/7 background |
 | 10 | Keyword spotting (6 fixed phrases) | 2 | Real but simplified vs full ASR; cut first if behind |

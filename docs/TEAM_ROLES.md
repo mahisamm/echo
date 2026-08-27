@@ -2,7 +2,7 @@
 
 | Person | Owns | Primary AI tool | When to use which |
 |--------|------|------------------|--------------------|
-| A (you) | CRNN model, training, evaluation, TFLite + OpenVINO export | Claude (reasoning/architecture) + Kaggle/Colab notebooks | Use Claude for "why this architecture," "explain this paper's method," writing evaluate.py logic. Use Codex only for boilerplate (data loaders, plotting confusion matrices) after the architecture itself is decided by you, not the AI. |
+| A (you) | YAMNet transfer-learning model, training, evaluation, TFLite + OpenVINO export | Claude (reasoning/architecture) + Kaggle/Colab notebooks | Use Claude for "why this architecture," "explain this paper's method," writing evaluate.py logic. Use Codex only for boilerplate (data loaders, plotting confusion matrices) after the architecture itself is decided by you, not the AI. |
 | B | Mobile app (all screens), maps integration | ChatGPT/Codex (agentic coding) | Give Codex one screen at a time with the ARCHITECTURE.md screen list. Antigravity/Gemini as second option specifically for Places/Maps API work. |
 | C | Risk scorer, guidance rule-base, backend, Demo Mode, integration/testing | ChatGPT/Codex + Antigravity | Codex for FastAPI boilerplate; write the risk_scorer.py weights/logic yourself (or with Claude) since you need to defend this formula in the viva too. |
 

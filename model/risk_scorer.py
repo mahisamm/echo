@@ -28,43 +28,47 @@ RISK_CONFIG = {
 class RiskScorer:
     def __init__(self, config=RISK_CONFIG):
         self.config = config
-        # Event history stores list of dicts: {"timestamp": float, "class": str}
-        self.event_history = []
+        # Keep temporal context per monitoring session/device. A process-global list
+        # would let one user's sounds raise another user's risk score.
+        self.event_history = {}
         
-    def add_event(self, class_name):
+    def add_event(self, class_name, context_id="default"):
         """
         Maintains a rolling temporal history window of detected sounds.
         We prune any events older than our lookback configuration.
         """
         now = time.time()
-        self.event_history.append({"timestamp": now, "class": class_name})
-        self.prune_history(now)
+        history = self.event_history.setdefault(context_id, [])
+        history.append({"timestamp": now, "class": class_name})
+        self.prune_history(now, context_id)
         
-    def prune_history(self, current_time):
+    def prune_history(self, current_time, context_id="default"):
         """
         Removes events that occurred outside the temporal lookback window.
         Reasoning: Older sounds lose relevance for context risk.
         """
         cutoff = current_time - self.config["temporal_lookback_seconds"]
-        self.event_history = [e for e in self.event_history if e["timestamp"] >= cutoff]
+        history = self.event_history.get(context_id, [])
+        self.event_history[context_id] = [e for e in history if e["timestamp"] >= cutoff]
         
-    def get_repeated_impulse_count(self):
+    def get_repeated_impulse_count(self, context_id="default"):
         """
         Calculates the number of hazardous sounds that occurred in the recent lookback window.
         Reasoning: A sequence of sounds (e.g. Gunshot -> Scream -> Shouting) is a strong
         indicator of real emergency environments.
         """
         # Exclude the very latest event to only count "repeats" or "context" events
-        if len(self.event_history) <= 1:
+        history = self.event_history.get(context_id, [])
+        if len(history) <= 1:
             return 0
             
         hazards = [
-            e for e in self.event_history[:-1] 
+            e for e in history[:-1]
             if e["class"] in self.config["hazard_classes"]
         ]
         return min(len(hazards), self.config["max_repeated_impulses"])
 
-    def calculate_risk(self, primary_conf, verification_conf, media_playback, sudden_motion, current_class):
+    def calculate_risk(self, primary_conf, verification_conf, media_playback, sudden_motion, current_class, context_id="default"):
         """
         Calculates the final 0-100 risk score and maps it to a risk level.
         
@@ -77,41 +81,31 @@ class RiskScorer:
         """
         weights = self.config["weights"]
         
-        # 1. Base Score calculation
-        score_sum = 0.0
-        
-        # Primary & Verification confidence scaling
-        score_sum += weights["primary_confidence"] * primary_conf
-        score_sum += weights["verification_confidence"] * verification_conf
+        # The weights are percentage points, not proportions to be re-normalized.
+        # For example, a 90% pass-one confidence contributes 31.5 points.
+        score_sum = 100.0 * (
+            weights["primary_confidence"] * primary_conf
+            + weights["verification_confidence"] * verification_conf
+        )
         
         # External device contexts
         if sudden_motion:
-            score_sum += weights["sudden_motion_detected"]
+            score_sum += 100.0 * weights["sudden_motion_detected"]
             
         # Temporal risk from history
         if current_class in self.config["hazard_classes"]:
-            self.add_event(current_class)
+            self.add_event(current_class, context_id)
             
         # Get count of previous hazardous events in lookback window
-        repeats = self.get_repeated_impulse_count()
-        score_sum += weights["repeated_impulse_count"] * repeats
+        repeats = self.get_repeated_impulse_count(context_id)
+        score_sum += 100.0 * weights["repeated_impulse_count"] * repeats
         
         # Apply media playback discount if active
         if media_playback:
-            score_sum += weights["media_playback_active"]
+            score_sum += 100.0 * weights["media_playback_active"]
             
-        # 2. Normalize and Cap between 0.0 and 1.15 (max possible positive sum without discount)
-        # Max positive raw score: 0.35 + 0.35 + 0.15 + 0.30 = 1.15
-        max_possible_score = (
-            weights["primary_confidence"] + 
-            weights["verification_confidence"] + 
-            weights["sudden_motion_detected"] + 
-            (weights["repeated_impulse_count"] * self.config["max_repeated_impulses"])
-        )
-        
-        # Normalize to 0 - 100 range
-        normalized_score = max(0.0, score_sum / max_possible_score) * 100.0
-        normalized_score = min(100.0, normalized_score)
+        # Clamp the explicitly point-based score to the published 0--100 scale.
+        normalized_score = min(100.0, max(0.0, score_sum))
         
         # 3. Categorize into risk level
         risk_score = round(normalized_score)

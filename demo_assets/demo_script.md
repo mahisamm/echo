@@ -8,7 +8,7 @@ This guide details how to demonstrate the Echo prototype during panel evaluation
    cd backend
    python -m uvicorn main:app --reload
    ```
-2. Open a browser and navigate to: `http://localhost:8000`
+2. Open a browser and navigate to: `http://127.0.0.1:8010`
 3. You will see the **ECHO Dashboard** containing a simulated smartphone running the Echo mobile application frame.
 
 ---
@@ -20,7 +20,7 @@ This guide details how to demonstrate the Echo prototype during panel evaluation
   1. Navigate to the **Demo** tab.
   2. Under **Method B (WAV Injection)**, click the **1. Gunshot** button.
 * **Explanation to Panel**:
-  > *"We are injecting a clean gunshot recording directly into the pipeline. The system performs Pass 1 (2-second candidate inference) and detects a potential gunshot exceeding 0.50 threshold. It immediately triggers Pass 2 (5-second verification), yielding high confidence. The risk scorer flags this as HIGH_RISK, prompting rule-based covers/safety guidance and retrieving nearby Police coordinates."*
+  > *"We are injecting a prepared clip directly into the local pipeline. For transient sounds such as gunshots, Echo shows provisional urgent guidance from Pass 1; it does not claim the audio proves an emergency. Nearby results are shown only when the provider responds, and any fallback is labeled."*
 * **Expected Outcome**:
   - Screen switches to **Monitor**.
   - Sound: Gunshot detected.
@@ -58,7 +58,7 @@ This guide details how to demonstrate the Echo prototype during panel evaluation
 * **Action**:
   1. Click **8. Background**.
 * **Explanation to Panel**:
-  > *"This represents normal background audio. The CRNN correctly outputs 'NORMAL' as the highest probability, keeping the device state secure and idle without triggering false warnings."*
+  > *"This represents normal background audio. The YAMNet-based classifier should output 'NORMAL' and keep the monitor idle. This demo result is not a real-world accuracy claim."*
 * **Expected Outcome**:
   - Status remains NORMAL.
   - No alert triggers.
@@ -71,7 +71,7 @@ This guide details how to demonstrate the Echo prototype during panel evaluation
   2. Check **Media Playback Active (Action Movie)**.
   3. Go to the **Demo** tab, and click **1. Gunshot**.
 * **Explanation to Panel**:
-  > *"An action movie can trigger acoustic gunshot detections. However, because Echo listens to device context, 'Media Playback Active' reduces the overall risk calculation by -0.25 weight. Thus, while the CRNN correctly identifies the acoustic signature, no high-risk emergency is triggered. This prevents annoying false alarms while watching TV."*
+  > *"An action movie can trigger acoustic gunshot detections. Media playback is a manual context signal in the browser prototype, so it reduces interruption only when no other danger signal conflicts. This is a review state, not proof the sound is safe."*
 * **Expected Outcome**:
   - Spectrogram/model detects gunshot.
   - **BUT** Risk Score is reduced below the High Risk threshold (shows SUSPICIOUS or POSSIBLE_DANGER instead of HIGH_RISK alert). No critical emergency sequence initiates.

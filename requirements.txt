@@ -1,7 +1,20 @@
-torch
-torchaudio
+# Model / training
+tensorflow
+tensorflow-hub
 librosa
 numpy
 pandas
-transformers
-datasets
+scikit-learn
+
+# Export (mobile TFLite + laptop-side OpenVINO benchmarking)
+openvino
+
+# Backend
+fastapi
+uvicorn[standard]
+python-multipart
+soundfile
+requests
+
+# Tests (FastAPI TestClient)
+httpx>=0.24,<1
