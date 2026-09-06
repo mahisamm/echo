@@ -30,10 +30,14 @@ def export_openvino(profile=REAL_PROFILE_NAME):
 
     try:
         import openvino as ov
-    except ImportError:
-        print("openvino package not found. Installing now...")
-        os.system("pip install openvino")
-        import openvino as ov
+    except ImportError as error:
+        raise SystemExit(
+            "openvino is not installed in the interpreter running this script. It is "
+            "listed in requirements.txt -- install it into the active virtualenv with\n"
+            "    python -m pip install -r requirements.txt\n"
+            "(or `python -m pip install openvino`) and re-run. A bare `pip install` was "
+            "removed here: it could install into a different Python than this one."
+        ) from error
 
     head_model = tf.keras.models.load_model(checkpoint_path)
     combined_model = build_combined_model(head_model)

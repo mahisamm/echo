@@ -39,10 +39,14 @@ For each clip:
 ```
 Input: 2048-d [mean | max] embedding
 BatchNormalization
-Dense(128, activation=relu, L2=1e-3)
+Dense(256, activation=relu, L2=1e-3)
 Dropout(0.3)
 Dense(8, activation=softmax)
 ```
+
+`hidden_units` defaults to 256 (`train_yamnet.build_classifier_head`,
+`train_model`, and the `--hidden-units` CLI flag all agree), which is what the
+checkpoint in `model/checkpoints/yamnet_head.keras` was trained with.
 
 Trained with class-weighted (inverse-frequency) `sparse_categorical_crossentropy` — "normal"
 outnumbers hazard classes roughly 15-to-1 in the current dataset, and without weighting the

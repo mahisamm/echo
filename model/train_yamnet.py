@@ -101,10 +101,12 @@ def build_or_load_embeddings(manifest_path, profile, cache_path):
     return embeddings, labels, splits, filepaths
 
 
-def build_classifier_head(num_classes, hidden_units=128, dropout=0.3):
-    # 2048-d input with only ~745 training examples is a lot of capacity for
-    # a small, noisy dataset -- a smaller hidden layer plus L2 weight decay
-    # trades some peak accuracy for a much less erratic validation curve.
+def build_classifier_head(num_classes, hidden_units=256, dropout=0.3):
+    # 2048-d input with only ~745 training examples is a lot of capacity for a
+    # small, noisy dataset, so the head stays deliberately shallow: one hidden
+    # layer with L2 weight decay and dropout, trading a little peak accuracy for
+    # a much less erratic validation curve. hidden_units defaults to 256 to
+    # match train_model()/the CLI and the checkpoint that ships in the repo.
     inputs = tf.keras.Input(shape=(EMBEDDING_DIM,), name="yamnet_embedding")
     x = tf.keras.layers.BatchNormalization()(inputs)
     x = tf.keras.layers.Dense(

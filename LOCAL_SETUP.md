@@ -3,9 +3,13 @@
 ## TL;DR
 
 ```powershell
-.\run_local.ps1 -Setup     # first time only: venv + deps + dataset + training (~5-10 min)
+.\run_local.ps1 -Setup     # first time only: venv + deps + dataset + training (~10-15 min)
 .\run_local.ps1            # every time after that
 ```
+
+> `-Setup` alone trains on **synthetic-only** audio (the backend runs, but the model
+> is well below the 0.95 F1 in `reports/evaluation_report.txt`). For the real number
+> you need `model/esc50_temp.zip` — see "Using real audio" below.
 
 Then open <http://127.0.0.1:8010> — that is the web emulator (Demo Mode, live mic monitoring,
 event history, contacts, nearby map). API docs: <http://127.0.0.1:8010/docs>.
@@ -23,9 +27,10 @@ Port 8010 is the default because port 8000 was already taken on this machine. Us
    `model/checkpoints/`, so a fresh clone has *no* audio and *no* model weights.
 3. **`model/prepare_dataset.py`** — builds `model/data/processed/metadata.csv` (a full
    provenance manifest: filepath, label, source_dataset, source_clip_id, split). It ingests
-   real ESC-50/UrbanSound8K audio for any class it can find a source for, and falls back to
-   labeled synthetic clips (`synthetic_*.wav`) for any class that still has zero real audio
-   afterward — currently gunshot and scream (see "Using real audio" below).
+   real ESC-50 audio **only if `model/esc50_temp.zip` is present** (it does not download it),
+   real UrbanSound8K **only if you extracted it under `model/data/raw/`**, and falls back to
+   labeled synthetic clips (`synthetic_*.wav`) for every class with no real source — which,
+   on a plain clone, is *all* of them (see "Using real audio" below).
 4. **`model/train_yamnet.py`** — downloads the pretrained YAMNet model from TF-Hub (frozen),
    extracts a mean+max-pooled embedding per clip, and trains a small classifier head on top.
    Writes `model/checkpoints/yamnet_head.keras`. `backend/main.py` calls `sys.exit(1)` at
@@ -34,8 +39,13 @@ Port 8010 is the default because port 8000 was already taken on this machine. Us
 ## Using real audio instead of synthetic-only
 
 ```powershell
-# ESC-50 (~600 MB, downloads automatically from GitHub)
+# ESC-50 (~600 MB). NOT auto-downloaded -- prepare_dataset.py only ingests it if
+# model/esc50_temp.zip already exists. To add it:
+#   1. Download https://github.com/karolpiczak/ESC-50/archive/master.zip
+#   2. Rename the downloaded file to  esc50_temp.zip  and put it directly in  model/
+#   3. Run prepare_dataset.py -- it extracts and ingests it automatically
 cd model; ..\.venv\Scripts\python.exe prepare_dataset.py
+..\.venv\Scripts\python.exe train_yamnet.py    # retrain the head on the now-real data
 
 # UrbanSound8K (~6 GB, NOT auto-downloaded -- Zenodo has repeatedly failed/dropped
 # connection when attempted from this environment). To use it:
