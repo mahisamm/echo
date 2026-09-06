@@ -367,9 +367,21 @@ class _AlertScreenState extends State<AlertScreen> {
     );
     final anySimulated = attempts.any((a) => a['status'] == 'simulated');
     // The backend reverse-geocodes the place label it was given (see
-    // backend/geocode.py) once the incident dispatches, so this is only
-    // ever a real resolved address -- never a fabricated fallback.
-    final placeLabel = incident['place_label']?.toString();
+    // backend/geocode.py) once the incident actually dispatches, but this
+    // card also renders for state == DISPATCHING -- the brief window after
+    // an incident is claimed for dispatch but before the geocode call has
+    // resolved and persisted a real address. During exactly that window,
+    // place_label is still whatever placeholder the app sent when creating
+    // the incident (see live_monitor_screen.dart / demo_screen.dart:
+    // 'Last known location'). Filter that placeholder out explicitly so
+    // this never displays it as if it were a real resolved address; the
+    // location line just doesn't show for a poll or two until the real one
+    // lands, which self-corrects well before the user could act on it.
+    final rawPlaceLabel = incident['place_label']?.toString();
+    final placeLabel =
+        (rawPlaceLabel == null || rawPlaceLabel == 'Last known location' || rawPlaceLabel.isEmpty)
+            ? null
+            : rawPlaceLabel;
 
     return AppCard(
       child: Column(

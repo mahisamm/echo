@@ -204,6 +204,27 @@ class _LiveMonitorScreenState extends State<LiveMonitorScreen> {
       riskLevel: _riskLevel,
     );
 
+    // A moderate-confidence ("SUSPICIOUS") read is worth logging, not worth a
+    // full-screen alarm -- see docs/DECISIONS_LOG.md #10. Reserve the alert
+    // screen (and the incident it would arm) for POSSIBLE_DANGER/HIGH_RISK;
+    // the backend's own escalation floor (ECHO_MIN_ESCALATION_RISK, default
+    // 61) would never actually dispatch below that anyway, so creating an
+    // incident here would only ever come back suppressed.
+    if (_riskLevel != 'POSSIBLE_DANGER' && _riskLevel != 'HIGH_RISK') {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            content: Text(
+              'Possible ${className.replaceAll('_', ' ')} ($riskScore/100, $_riskLevel) '
+              '— logged, below the alert threshold.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
     final position = await _currentPosition();
 
     // The incident is what actually reaches other people: it arms the

@@ -104,11 +104,39 @@ def escalation_gate(*, verified, class_name, risk_score, user_id, force=False):
 
 
 def last_escalation_time(user_id):
+    """When this user's cooldown clock last started -- the moment an incident
+    was armed (created_at), not the moment it finished dispatching.
+
+    Two things this must get right, both found by testing after the fact:
+
+    1. Must exclude class_name='normal': /escalation/test (a rehearsal
+       button) creates its incident with class_name="normal" and does
+       dispatch for real. Using dispatched_at with no class filter meant
+       running a test alert armed a real cooldown window afterward -- a
+       genuine emergency arriving within cooldown_seconds of a rehearsal
+       would come back "Cooldown active" and never reach the user's
+       contacts. No real incident is ever created with class_name="normal"
+       (escalation_gate requires an ESCALATION_CLASSES member), so this
+       filter can never exclude a real emergency.
+    2. Must key off created_at, not dispatched_at, and must count PENDING/
+       DISPATCHING incidents, not only ones that finished. Every incident
+       sits PENDING for cancel_window_seconds before it dispatches; using
+       only completed dispatches meant two verified high-risk detections
+       arriving seconds apart (repeat gunfire, a burst of alarm sounds --
+       exactly the "firecracker night" scenario this cooldown exists for,
+       see the module docstring) could BOTH pass the gate and both go on to
+       call/message contacts, because neither had a dispatched_at yet when
+       the other checked.
+
+    CANCELLED/SUPPRESSED/NO_CONTACTS incidents don't count: they were never
+    delivered, so they shouldn't block a later real escalation from arming.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT MAX(dispatched_at) FROM incidents WHERE user_id = ? AND dispatched_at IS NOT NULL",
-            (user_id,),
+            "SELECT MAX(created_at) FROM incidents WHERE user_id = ? AND class_name != 'normal' "
+            "AND state IN (?, ?, ?)",
+            (user_id, STATE_PENDING, STATE_DISPATCHING, STATE_DISPATCHED),
         )
         row = cursor.fetchone()
     return row[0] if row and row[0] else None
@@ -155,7 +183,20 @@ def create_incident(*, user_id, class_name, raw_class=None, profile="real",
         )
         conn.commit()
 
-    purge_expired_clips()
+    try:
+        purge_expired_clips()
+    except Exception as error:
+        # The incident row is already committed above -- a transient DB
+        # error here (e.g. lock contention with a concurrent dispatch
+        # thread) must not turn a successful incident creation into an
+        # unhandled 500. The client would never receive the incident_id, so
+        # it could never show the cancel countdown or let the user cancel,
+        # even though the incident still exists and _sweep_loop will
+        # dispatch it once its deadline passes. Losing a retention-cleanup
+        # pass is a fully recoverable, low-stakes failure; losing the
+        # response to this call is not.
+        print("purge_expired_clips failed during incident creation: {}".format(error))
+
     return get_incident(incident_id)
 
 
@@ -328,25 +369,50 @@ def dispatch_incident(incident_id, telegram=None, voice=None, user_label=None):
         contact_id = contact.get("id")
         contact_name = contact.get("name")
 
-        if contact.get("notify_telegram", 1):
-            status, detail = telegram.send_alert(
-                chat_id=contact.get("telegram_chat_id"),
-                message=message,
-                clip_path=clip_path,
-                latitude=incident.get("latitude"),
-                longitude=incident.get("longitude"),
-            )
-            _record_attempt(incident_id, contact_id, contact_name, "telegram", status, detail)
+        # TelegramNotifier/VoiceCaller already catch their own network
+        # errors and return status="failed" rather than raising -- this
+        # try/except is for the DB write (_record_attempt) itself. A single
+        # contact's write hiccup (e.g. transient SQLite lock contention with
+        # a concurrent request) must not abort the loop: every other saved
+        # contact still needs their real call/message. It also protects
+        # against this loop being what leaves an incident stuck in
+        # DISPATCHING forever -- due_pending_incidents() only ever re-picks
+        # up PENDING incidents, so a dispatch that dies mid-loop today has
+        # no retry path.
+        try:
+            if contact.get("notify_telegram", 1):
+                status, detail = telegram.send_alert(
+                    chat_id=contact.get("telegram_chat_id"),
+                    message=message,
+                    clip_path=clip_path,
+                    latitude=incident.get("latitude"),
+                    longitude=incident.get("longitude"),
+                )
+                _record_attempt(incident_id, contact_id, contact_name, "telegram", status, detail)
 
-        if contact.get("notify_call", 1):
-            status, detail = voice.place_call(
-                to_number=contact.get("phone"),
-                incident_id=incident_id,
-                script=script,
-            )
-            _record_attempt(incident_id, contact_id, contact_name, "voice_call", status, detail)
+            if contact.get("notify_call", 1):
+                status, detail = voice.place_call(
+                    to_number=contact.get("phone"),
+                    incident_id=incident_id,
+                    script=script,
+                )
+                _record_attempt(incident_id, contact_id, contact_name, "voice_call", status, detail)
+        except Exception as error:
+            print("Escalation attempt failed for contact {} on incident {}: {}".format(
+                contact_id, incident_id, error
+            ))
 
-    _set_state(incident_id, STATE_DISPATCHED, dispatched_at=time.time())
+    try:
+        _set_state(incident_id, STATE_DISPATCHED, dispatched_at=time.time())
+    except Exception as error:
+        # Contacts were already (attempted to be) called/messaged above --
+        # that already happened and can't be undone. Losing this final
+        # state-write would strand the incident in DISPATCHING with no
+        # retry path; logging loudly here at least makes the failure
+        # visible instead of a silent 500 mid-dispatch.
+        print("Failed to mark incident {} DISPATCHED after dispatch attempts: {}".format(
+            incident_id, error
+        ))
     return get_incident(incident_id)
 
 

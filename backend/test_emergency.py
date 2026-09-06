@@ -218,6 +218,74 @@ def test_clip_retention_purge_removes_expired_audio():
     assert emergency.get_incident(incident["id"])["clip_path"] is None
 
 
+def test_escalation_test_incident_never_contaminates_a_real_cooldown():
+    """/escalation/test creates a class_name='normal' incident and dispatches
+    it for real (as a rehearsal). That must never count toward the cooldown
+    a genuine emergency needs to pass -- see docs/DECISIONS_LOG.md #11."""
+    user = "rehearsal_user"
+    _add_contact(user)
+
+    # Simulates what POST /escalation/test does: a real dispatch of a
+    # class_name="normal" incident.
+    rehearsal = emergency.create_incident(
+        user_id=user, class_name="normal", raw_class="test", profile="demo",
+        risk_score=0, risk_level="TEST", cancel_window=0,
+    )
+    emergency.dispatch_incident(rehearsal["id"], telegram=FakeTelegram(), voice=FakeVoice())
+
+    # A real emergency arriving immediately afterward must still be eligible.
+    allowed, reason = emergency.escalation_gate(
+        verified=True, class_name="gunshot", risk_score=90, user_id=user
+    )
+    assert allowed, "a rehearsal alert must never block a real one: {}".format(reason)
+
+
+def test_cooldown_blocks_a_second_incident_before_the_first_finishes_dispatching():
+    """Two verified high-risk detections arriving seconds apart (repeat
+    gunfire, a burst of alarm sounds -- the exact 'firecracker night'
+    scenario the cooldown exists for) must not both reach contacts just
+    because neither had dispatched yet when the other was gated."""
+    user = "concurrent_user"
+    _add_contact(user)
+    settings.cooldown_seconds = 300.0
+    try:
+        first = emergency.create_incident(
+            user_id=user, class_name="gunshot", risk_score=90, risk_level="HIGH_RISK",
+            cancel_window=60,  # still PENDING, not yet dispatched
+        )
+        assert first["state"] == emergency.STATE_PENDING
+
+        allowed, reason = emergency.escalation_gate(
+            verified=True, class_name="scream", risk_score=85, user_id=user
+        )
+        assert not allowed and "Cooldown" in reason, (
+            "a second incident must not pass the gate while the first is still PENDING"
+        )
+    finally:
+        settings.cooldown_seconds = 0.0
+
+
+def test_cancelled_incident_does_not_block_a_later_real_escalation():
+    """An incident the user correctly cancelled as a false alarm must not
+    itself burn the cooldown window against a later, genuine one."""
+    user = "cancel_then_real_user"
+    _add_contact(user)
+    settings.cooldown_seconds = 300.0
+    try:
+        incident = emergency.create_incident(
+            user_id=user, class_name="gunshot", risk_score=90, risk_level="HIGH_RISK",
+            cancel_window=60,
+        )
+        assert emergency.cancel_incident(incident["id"], user_id=user)
+
+        allowed, reason = emergency.escalation_gate(
+            verified=True, class_name="gunshot", risk_score=92, user_id=user
+        )
+        assert allowed, "a cancelled (false-alarm) incident must not block a later real one: {}".format(reason)
+    finally:
+        settings.cooldown_seconds = 0.0
+
+
 def test_dispatch_resolves_a_real_address_for_a_placeholder_label(monkeypatch):
     """A generic client-sent place_label ('Last known location') must be
     replaced by a real resolved address at dispatch time, and persisted onto

@@ -81,13 +81,17 @@ class MotionService {
     });
   }
 
-  /// Stops the sensor subscription and any pending decay timer. Must be
-  /// called from the owning State's dispose() to avoid leaking the stream
-  /// subscription.
+  /// Stops the sensor subscription and any pending decay timer, and disposes
+  /// [detected]. Must be called from the owning State's dispose() to avoid
+  /// leaking the stream subscription -- and must be called AFTER removing
+  /// any listener registered on [detected] (main.dart does this in the
+  /// correct order), since disposing a ValueNotifier with a live listener
+  /// still attached is itself a leak/error source.
   void dispose() {
     _subscription?.cancel();
     _subscription = null;
     _decayTimer?.cancel();
     _decayTimer = null;
+    detected.dispose();
   }
 }

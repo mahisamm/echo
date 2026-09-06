@@ -250,8 +250,15 @@ async def detect_audio(
                 media_playback, context_source, acoustic_media_score
             )
 
-            # Immediate verification for transient events (gunshot, explosion, glass_breaking)
-            if has_candidate and resolved in ["gunshot", "explosion", "glass_breaking"]:
+            # Immediate verification for genuinely single-shot, urgent events only
+            # (gunshot, explosion). glass_breaking was removed from this list (see
+            # docs/DECISIONS_LOG.md #10): it is not in URGENT_HAZARDS and does not
+            # skip the cancel window or emergency handoff, so it should not skip a
+            # real second listen either -- reusing one 2-second confidence value as
+            # both "primary" and "verification" let a single ambiguous transient
+            # (a click, a clatter) read as independently double-confirmed when it
+            # was only ever heard once.
+            if has_candidate and resolved in ["gunshot", "explosion"]:
                 risk_score, risk_level = scorer.calculate_risk(
                     primary_conf=confidence,
                     verification_conf=confidence,

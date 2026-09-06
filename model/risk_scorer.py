@@ -25,31 +25,49 @@ RISK_CONFIG = {
     ]
 }
 
+MAX_TRACKED_CONTEXTS = 2000
+
+
 class RiskScorer:
     def __init__(self, config=RISK_CONFIG):
         self.config = config
         # Keep temporal context per monitoring session/device. A process-global list
         # would let one user's sounds raise another user's risk score.
         self.event_history = {}
-        
+
     def add_event(self, class_name, context_id="default"):
         """
         Maintains a rolling temporal history window of detected sounds.
         We prune any events older than our lookback configuration.
         """
         now = time.time()
+        if context_id not in self.event_history and len(self.event_history) >= MAX_TRACKED_CONTEXTS:
+            # context_id is an unauthenticated, client-supplied user_id, so
+            # this dict is reachable by anyone -- bound it the same way
+            # geocode.py's reverse-geocode cache is bounded (FIFO eviction)
+            # rather than growing one entry per distinct id forever.
+            self.event_history.pop(next(iter(self.event_history)), None)
         history = self.event_history.setdefault(context_id, [])
         history.append({"timestamp": now, "class": class_name})
         self.prune_history(now, context_id)
-        
+
     def prune_history(self, current_time, context_id="default"):
         """
         Removes events that occurred outside the temporal lookback window.
-        Reasoning: Older sounds lose relevance for context risk.
+        Reasoning: Older sounds lose relevance for context risk. Drops the
+        dict key entirely once its history is empty, instead of leaving a
+        `[]` behind forever -- a context that had exactly one hazard event
+        and nothing since must not keep a permanent entry.
         """
         cutoff = current_time - self.config["temporal_lookback_seconds"]
-        history = self.event_history.get(context_id, [])
-        self.event_history[context_id] = [e for e in history if e["timestamp"] >= cutoff]
+        history = self.event_history.get(context_id)
+        if history is None:
+            return
+        pruned = [e for e in history if e["timestamp"] >= cutoff]
+        if pruned:
+            self.event_history[context_id] = pruned
+        else:
+            self.event_history.pop(context_id, None)
         
     def get_repeated_impulse_count(self, context_id="default"):
         """
@@ -92,10 +110,22 @@ class RiskScorer:
         if sudden_motion:
             score_sum += 100.0 * weights["sudden_motion_detected"]
             
+        # Prune stale history for this context BEFORE reading it, even when
+        # the current call isn't itself a hazard (a "normal" read, or an
+        # unverified detection -- main.py passes current_class="normal" for
+        # those). Without this, add_event()/prune_history() only ever ran
+        # together on a fresh hazard, so a context that saw a hazard
+        # sequence once could keep contributing a phantom repeated-impulse
+        # boost to every later, unrelated score for that same user_id no
+        # matter how much later -- reproduced: a NORMAL-scoring read next to
+        # 1-hour-stale hazard history came back SUSPICIOUS instead. See
+        # docs/DECISIONS_LOG.md #11.
+        self.prune_history(time.time(), context_id)
+
         # Temporal risk from history
         if current_class in self.config["hazard_classes"]:
             self.add_event(current_class, context_id)
-            
+
         # Get count of previous hazardous events in lookback window
         repeats = self.get_repeated_impulse_count(context_id)
         score_sum += 100.0 * weights["repeated_impulse_count"] * repeats

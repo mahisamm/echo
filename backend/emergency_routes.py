@@ -45,6 +45,11 @@ MAX_CLIP_BYTES = 4 * 1024 * 1024
 # deployment; it resets on restart, which is acceptable for what this
 # protects (accidental double-taps and naive abuse, not a hardened API).
 _rate_log = {}
+# user_id is an unauthenticated, client-supplied string (no real auth --
+# documented, out of scope here), so this dict is reachable by anyone: a
+# stream of distinct throwaway user_ids would otherwise grow it forever.
+# Bounded FIFO eviction, same pattern as geocode.py's reverse-geocode cache.
+_RATE_LOG_MAX_KEYS = 2000
 
 
 def _rate_limited(bucket, key, limit, window_seconds):
@@ -52,6 +57,8 @@ def _rate_limited(bucket, key, limit, window_seconds):
     log_key = (bucket, key)
     stamps = [t for t in _rate_log.get(log_key, []) if now - t < window_seconds]
     stamps.append(now)
+    if log_key not in _rate_log and len(_rate_log) >= _RATE_LOG_MAX_KEYS:
+        _rate_log.pop(next(iter(_rate_log)), None)
     _rate_log[log_key] = stamps
     return len(stamps) > limit
 
@@ -195,8 +202,14 @@ def incident_detail(incident_id: str):
 
 
 @router.post("/incidents/{incident_id}/cancel")
-def cancel_incident(incident_id: str, user_id: Optional[str] = Form(None),
+def cancel_incident(incident_id: str, user_id: str = Form(...),
                     note: str = Form("Marked safe by the user.")):
+    # user_id required (not optional): emergency.cancel_incident's own
+    # user_id=None default exists for internal/admin-style callers, but the
+    # HTTP route must not let a client trivially skip the ownership filter
+    # just by omitting the field -- both real clients (web, app) always send
+    # it already, so this closes a no-cost bypass without changing behavior
+    # for anyone using the app normally.
     incident = emergency.get_incident(incident_id)
     if incident is None:
         raise HTTPException(status_code=404, detail="Incident not found.")

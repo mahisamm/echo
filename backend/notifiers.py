@@ -159,6 +159,7 @@ class TelegramNotifier:
                 )
 
             details = ["message sent"]
+            sub_send_failed = False
 
             if clip_path and os.path.exists(clip_path):
                 with open(clip_path, "rb") as clip:
@@ -179,10 +180,11 @@ class TelegramNotifier:
                             files={"document": (os.path.basename(clip_path), clip, "audio/wav")},
                             timeout=self.timeout,
                         )
-                details.append(
-                    "clip sent" if audio_response.status_code == 200
-                    else "clip failed HTTP {}".format(audio_response.status_code)
-                )
+                if audio_response.status_code == 200:
+                    details.append("clip sent")
+                else:
+                    details.append("clip failed HTTP {}".format(audio_response.status_code))
+                    sub_send_failed = True
             else:
                 details.append("no clip available")
 
@@ -192,11 +194,22 @@ class TelegramNotifier:
                     data={"chat_id": chat_id, "latitude": latitude, "longitude": longitude},
                     timeout=self.timeout,
                 )
-                details.append(
-                    "location pin sent" if location_response.status_code == 200
-                    else "location failed HTTP {}".format(location_response.status_code)
-                )
+                if location_response.status_code == 200:
+                    details.append("location pin sent")
+                else:
+                    details.append("location failed HTTP {}".format(location_response.status_code))
+                    sub_send_failed = True
 
+            # The text message reaching the contact is necessary but not
+            # sufficient: the evidence clip and the location pin are what
+            # make the alert actionable, not just alarming. A caller/UI that
+            # treats `status` as the coarse pass/fail signal (which is
+            # exactly what escalation_attempts.status is for) must not see
+            # "sent" when the single most important payload never arrived --
+            # downgrade to "failed" rather than burying that in `detail`
+            # text nobody's guaranteed to read.
+            if sub_send_failed:
+                return "failed", "message sent, but " + "; ".join(details[1:])
             return "sent", "; ".join(details)
         except Exception as error:  # network failure must degrade, not crash
             return "failed", "Telegram request error: {}".format(error)

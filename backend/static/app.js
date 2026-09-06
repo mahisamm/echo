@@ -19,11 +19,25 @@ let displayName = "Echo user";
 // on-brand notification -- "something went wrong" should never feel like a
 // browser popup in an app whose whole job is calm, trustworthy signaling.
 const toastStack = document.getElementById('toast-stack');
+const MAX_STACKED_TOASTS = 4;
 function showToast(message, kind = 'info', timeoutMs = 4200) {
+    // Built with DOM nodes + textContent, not innerHTML: some callers pass
+    // through user-entered text (a contact's name), and a toast is exactly
+    // the kind of thing that fires unattended (e.g. "<name> added") -- it
+    // must never be able to inject markup/script.
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    const text = document.createElement('span');
+    text.textContent = message;
     const el = document.createElement('div');
     el.className = `toast ${kind}`;
-    el.innerHTML = `<span class="dot"></span><span>${message}</span>`;
+    el.append(dot, text);
     toastStack.appendChild(el);
+    // A burst of near-simultaneous failures (e.g. several demo clicks
+    // during a backend outage) must not pile toasts up forever.
+    while (toastStack.children.length > MAX_STACKED_TOASTS) {
+        toastStack.firstElementChild.remove();
+    }
     setTimeout(() => {
         el.classList.add('leaving');
         setTimeout(() => el.remove(), 200);
@@ -440,15 +454,26 @@ function renderEscalationAttempts(attempts, container) {
         return;
     }
     attempts.forEach(a => {
-        const li = document.createElement('li');
+        // Built with DOM nodes + textContent, not a template-literal
+        // innerHTML: contact_name and detail are stored copies of a
+        // user-entered contact name and echo straight back from the
+        // backend, so this must not be able to inject markup.
         const channelLabel = a.channel === 'voice_call' ? 'Automated call' : a.channel === 'telegram' ? 'Telegram' : a.channel;
-        li.innerHTML = `
-            <div>
-                <div class="chan"><strong>${a.contact_name || 'Contact'}</strong> · ${channelLabel}</div>
-                <div class="detail">${a.detail || ''}</div>
-            </div>
-            <span class="esc-status ${a.status}">${a.status}</span>
-        `;
+        const strong = document.createElement('strong');
+        strong.textContent = a.contact_name || 'Contact';
+        const chan = document.createElement('div');
+        chan.className = 'chan';
+        chan.append(strong, document.createTextNode(' · ' + channelLabel));
+        const detail = document.createElement('div');
+        detail.className = 'detail';
+        detail.textContent = a.detail || '';
+        const info = document.createElement('div');
+        info.append(chan, detail);
+        const status = document.createElement('span');
+        status.className = `esc-status ${a.status}`;
+        status.textContent = a.status;
+        const li = document.createElement('li');
+        li.append(info, status);
         container.appendChild(li);
     });
 }
@@ -465,7 +490,7 @@ function setCountdownRing(secondsLeft, totalSeconds) {
     if (ring) ring.style.strokeDashoffset = String(circumference * (1 - pct));
     const numberEl = document.getElementById('escalation-countdown');
     const inlineEl = document.getElementById('escalation-countdown-inline');
-    const rounded = Math.ceil(secondsLeft);
+    const rounded = Math.max(0, Math.ceil(secondsLeft));
     if (numberEl) numberEl.textContent = rounded;
     if (inlineEl) inlineEl.textContent = rounded;
 }
@@ -516,33 +541,102 @@ function showEscalationState(incident) {
     renderEscalationAttempts(incident.attempts || [], document.getElementById('escalation-attempts-list'));
 }
 
+let escalationPollFailures = 0;
+const MAX_POLL_FAILURES = 5;
+
 async function pollIncident(incidentId) {
     try {
         const res = await fetch(`/incidents/${incidentId}`);
-        if (!res.ok) return;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const incident = await res.json();
+        escalationPollFailures = 0;
         showEscalationState(incident);
         if (incident.state !== 'PENDING' && incident.state !== 'DISPATCHING') {
             stopEscalationTimers();
         }
     } catch (e) {
         console.error("Incident poll error:", e);
+        // A silently-frozen countdown is worse than an honest error: the
+        // real dispatch may already have happened server-side with no way
+        // for this client to know. Stop spinning after a few misses instead
+        // of polling a failing endpoint forever with the ring frozen at
+        // whatever it last showed.
+        escalationPollFailures += 1;
+        if (escalationPollFailures >= MAX_POLL_FAILURES) {
+            stopEscalationTimers();
+            showToast(
+                "Lost contact with the backend while tracking this alert -- check Event history "
+                + "to see whether it actually dispatched.",
+                "error", 8000
+            );
+        }
+    }
+}
+
+// Set while a "Cancel"/"I'm safe" click lands before createIncidentAndEscalate
+// has resolved (still waiting on geolocation, etc. -- there's no incident id
+// yet to cancel). Without tracking this, the click was a silent no-op and
+// the incident went on to arm and dispatch anyway, invisibly, behind a modal
+// the user believed they'd already dismissed.
+let escalationCancelRequested = false;
+
+// Cancels a real incident and reports EXACTLY what happened -- the backend's
+// /cancel can return 200 with cancelled:false (e.g. it already dispatched),
+// and that must never be shown to the user as a success. Shared by the
+// Cancel button, "I'm safe", and the race-recovery path in startEscalation
+// below, so all three report identically instead of each getting its own
+// (previously divergent, previously wrong) copy of this logic.
+async function requestCancelIncident(incidentId, note) {
+    try {
+        const res = await fetch(`/incidents/${incidentId}/cancel`, {
+            method: 'POST',
+            body: new URLSearchParams({ user_id: userId, note })
+        });
+        const data = await res.json();
+        if (data.cancelled) {
+            showToast("Cancelled — nobody was called or messaged.", "success");
+        } else {
+            showToast(data.reason || "Could not cancel — it may already have dispatched.", "error");
+        }
+        return data.incident || null;
+    } catch (e) {
+        console.error("Cancel error:", e);
+        showToast("Could not cancel — the request failed. Try again.", "error");
+        return null;
     }
 }
 
 async function startEscalation(data, clipBlob) {
     currentIncidentId = null;
+    escalationCancelRequested = false;
     showEscalationState({ state: 'PENDING', seconds_to_dispatch: 0 });
     try {
         const incident = await createIncidentAndEscalate(data, clipBlob);
-        currentIncidentId = incident.id;
         escalationTotalWindow = (escalationStatus && escalationStatus.cancel_window_seconds) || incident.seconds_to_dispatch || 12;
+
+        if (escalationCancelRequested) {
+            // The user already clicked Cancel/"I'm safe" while this incident
+            // was still being created. Honor that now instead of silently
+            // arming a countdown for something they already dismissed.
+            currentIncidentId = incident.id;
+            if (incident.escalation_armed) {
+                const cancelled = await requestCancelIncident(incident.id, "Cancelled before the alert finished arming.");
+                showEscalationState(cancelled || { state: 'CANCELLED' });
+            } else {
+                showEscalationState({ state: incident.state || 'CANCELLED' });
+            }
+            currentIncidentId = null;
+            return;
+        }
+
+        currentIncidentId = incident.id;
         if (!incident.escalation_armed) {
             showEscalationState({ state: 'SUPPRESSED', gate_reason: incident.gate_reason });
             return;
         }
         showEscalationState(incident);
         stopEscalationTimers();
+        escalationPollFailures = 0;
         escalationPollTimer = setInterval(() => pollIncident(incident.id), 1000);
     } catch (e) {
         console.error("Escalation error:", e);
@@ -552,20 +646,16 @@ async function startEscalation(data, clipBlob) {
 }
 
 document.getElementById('escalation-cancel-btn').addEventListener('click', async () => {
-    if (!currentIncidentId) return;
-    try {
-        const res = await fetch(`/incidents/${currentIncidentId}/cancel`, {
-            method: 'POST',
-            body: new URLSearchParams({ user_id: userId, note: "Marked safe by the user." })
-        });
-        const data = await res.json();
-        stopEscalationTimers();
-        showEscalationState(data.incident || { state: 'CANCELLED' });
-        showToast("Cancelled — nobody was called or messaged.", "success");
-    } catch (e) {
-        console.error("Cancel error:", e);
-        showToast("Could not cancel — the request failed. Try again.", "error");
+    if (!currentIncidentId) {
+        escalationCancelRequested = true;
+        showToast("Cancelling as soon as the alert finishes arming…", "info");
+        return;
     }
+    stopEscalationTimers();
+    const incidentId = currentIncidentId;
+    currentIncidentId = null;
+    const cancelled = await requestCancelIncident(incidentId, "Marked safe by the user.");
+    showEscalationState(cancelled || { state: 'CANCELLED' });
 });
 
 function downloadIncidentReport() {
@@ -722,11 +812,7 @@ async function runPipelinePass1() {
 
                     if (data.verified) {
                         await logVerifiedEvent(data);
-                    }
-                    if (data.verified && data.should_alert) {
-                        triggerAlertModal(data, wavBlob);
-                    } else if (data.media_suppressed) {
-                        lastEventDetails.innerText = "Verified sound recorded as likely media playback; no critical alert shown.";
+                        handleVerifiedDetection(data, wavBlob);
                     }
                 } else {
                     // Trigger Pass 2: Verify candidate over a 5s window
@@ -808,11 +894,7 @@ async function runPipelinePass2(candidate, p1Conf) {
 
             if (data.verified) {
                 await logVerifiedEvent(data);
-            }
-            if (data.verified && data.should_alert) {
-                triggerAlertModal(data, wavBlob);
-            } else if (data.verified && data.media_suppressed) {
-                lastEventDetails.innerText = "Verified sound recorded as likely media playback; no critical alert shown.";
+                handleVerifiedDetection(data, wavBlob);
             }
         } catch (e) {
             console.error("Pass 2 Verification error:", e);
@@ -897,8 +979,56 @@ function updateUIForClass(cls, p1, p2, risk, level) {
     }
 }
 
+// A verified detection can be worth logging without being worth a full-screen
+// alarm. Reserve the intrusive modal (guidance, nearby facilities, escalation
+// countdown) for POSSIBLE_DANGER/HIGH_RISK -- a SUSPICIOUS-level "should_alert"
+// (any verified hazard-class reading with risk >= 31, per safety_policy.py's
+// REVIEW_NOW state) still gets surfaced, just as a toast and a quiet log
+// entry instead of the same screen used for an actual emergency. Popping the
+// full alert for every borderline, moderate-confidence read trains the user
+// to distrust or dismiss it -- see docs/DECISIONS_LOG.md #10.
+const FULL_ALERT_LEVELS = new Set(['POSSIBLE_DANGER', 'HIGH_RISK']);
+
+function handleVerifiedDetection(data, clipBlob) {
+    if (!data.should_alert) {
+        if (data.media_suppressed) {
+            lastEventDetails.innerText = "Verified sound recorded as likely media playback; no critical alert shown.";
+        }
+        return;
+    }
+    if (FULL_ALERT_LEVELS.has(normalizeRiskLevel(data.risk_level))) {
+        triggerAlertModal(data, clipBlob);
+        return;
+    }
+    const label = (data.candidate || 'sound').replace(/_/g, ' ');
+    showToast(
+        `Possible ${label} (${data.risk_score}/100, ${data.risk_level}) — logged, below the alert threshold.`,
+        'info', 5000
+    );
+    lastEventDetails.innerHTML = `
+        <strong>${(data.candidate || '').toUpperCase()}</strong><br>
+        Risk Score: ${data.risk_score} (${data.risk_level}) — reviewed, not alarmed<br>
+        Conf: P1=${((data.primary_confidence || 0) * 100).toFixed(0)}%, P2=${((data.verification_confidence || 0) * 100).toFixed(0)}%
+    `;
+}
+
 // Trigger Alert View Overlay
 async function triggerAlertModal(data, clipBlob) {
+    if (alertModal.classList.contains('show')) {
+        // A second detection landing while an alert is already open used to
+        // start a competing startEscalation() call -- resetting
+        // currentIncidentId out from under the first one, orphaning its
+        // poll timer, and making Cancel able to cancel the wrong incident
+        // while the real one dispatched unattended. One alert at a time:
+        // this one is still logged (the caller already did that before
+        // reaching here), just not opened as a second competing modal.
+        showToast(
+            `Another ${(data.candidate || 'sound').replace(/_/g, ' ')} detected `
+            + `(${data.risk_score}/100) while an alert is already open.`,
+            'info'
+        );
+        return;
+    }
     latestIncident = data;
     notifyUrgentIncident(data);
     const normalizedLevel = normalizeRiskLevel(data.risk_level);
@@ -987,17 +1117,17 @@ async function triggerAlertModal(data, clipBlob) {
 dismissAlertBtn.addEventListener('click', async () => {
     // "I'm safe" also cancels a still-pending escalation -- closing the modal
     // must not leave a countdown silently running in the background.
-    if (currentIncidentId) {
-        try {
-            await fetch(`/incidents/${currentIncidentId}/cancel`, {
-                method: 'POST',
-                body: new URLSearchParams({ user_id: userId, note: "Dismissed by the user." })
-            });
-        } catch (e) {
-            console.error("Cancel-on-dismiss error:", e);
-        }
-    }
     stopEscalationTimers();
+    if (currentIncidentId) {
+        await requestCancelIncident(currentIncidentId, "Dismissed by the user.");
+    } else {
+        // Incident creation may still be in flight (waiting on geolocation,
+        // etc.) -- there's no id yet to cancel. Same race as the Cancel
+        // button: flag it so startEscalation cancels it the moment it does
+        // get an id, instead of it arming and dispatching invisibly behind
+        // a modal the user already closed.
+        escalationCancelRequested = true;
+    }
     currentIncidentId = null;
     alertModal.classList.remove('show');
 });
@@ -1055,22 +1185,37 @@ function loadContacts() {
                 return;
             }
             data.forEach(contact => {
-                const card = document.createElement('div');
-                card.className = 'contact-card';
+                // Built with DOM nodes + textContent, not innerHTML: name/
+                // relation/phone are user-entered text round-tripped from
+                // the backend, and must not be able to inject markup.
                 const callOn = contact.notify_call === undefined ? true : !!contact.notify_call;
                 const tgOn = contact.notify_telegram === undefined ? true : !!contact.notify_telegram;
-                const badges = [
-                    callOn ? '<span class="chan-pill live">Call</span>' : '<span class="chan-pill">Call off</span>',
-                    (tgOn && contact.telegram_chat_id) ? '<span class="chan-pill live">Telegram</span>' : tgOn ? '<span class="chan-pill sim">Telegram (no chat id)</span>' : '<span class="chan-pill">Telegram off</span>',
-                ].join(' ');
-                card.innerHTML = `
-                    <div class="info">
-                        <h4>${contact.name}${contact.relation ? ` (${contact.relation})` : ''}</h4>
-                        <p>${contact.phone}</p>
-                        <p>${badges}</p>
-                    </div>
-                    <button class="delete-btn" onclick="deleteContact(${contact.id})">Delete</button>
-                `;
+
+                const name = document.createElement('h4');
+                name.textContent = contact.name + (contact.relation ? ` (${contact.relation})` : '');
+                const phone = document.createElement('p');
+                phone.textContent = contact.phone;
+                const badgesRow = document.createElement('p');
+                const callPill = document.createElement('span');
+                callPill.className = callOn ? 'chan-pill live' : 'chan-pill';
+                callPill.textContent = callOn ? 'Call' : 'Call off';
+                const tgPill = document.createElement('span');
+                tgPill.className = (tgOn && contact.telegram_chat_id) ? 'chan-pill live' : tgOn ? 'chan-pill sim' : 'chan-pill';
+                tgPill.textContent = (tgOn && contact.telegram_chat_id) ? 'Telegram' : tgOn ? 'Telegram (no chat id)' : 'Telegram off';
+                badgesRow.append(callPill, document.createTextNode(' '), tgPill);
+
+                const info = document.createElement('div');
+                info.className = 'info';
+                info.append(name, phone, badgesRow);
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'delete-btn';
+                deleteBtn.textContent = 'Delete';
+                deleteBtn.addEventListener('click', () => deleteContact(contact.id));
+
+                const card = document.createElement('div');
+                card.className = 'contact-card';
+                card.append(info, deleteBtn);
                 contactsContainer.appendChild(card);
             });
         })
@@ -1106,6 +1251,7 @@ saveContactBtn.addEventListener('click', () => {
         contactPhoneInput.value = "";
         contactRelationInput.value = "";
         contactTelegramInput.value = "";
+        contactPriorityInput.value = "100";
         contactNotifyCall.checked = true;
         contactNotifyTelegram.checked = true;
         chatPicker.hidden = true;
@@ -1116,11 +1262,16 @@ saveContactBtn.addEventListener('click', () => {
     .catch(() => showToast("Could not save that contact. Check the backend is running.", "error"));
 });
 
-window.deleteContact = function(id) {
+function deleteContact(id) {
     fetch(`/contacts/${id}?user_id=${encodeURIComponent(userId)}`, { method: 'DELETE' })
-        .then(() => { loadContacts(); loadReadiness(); showToast("Contact removed.", "info"); })
+        .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            loadContacts();
+            loadReadiness();
+            showToast("Contact removed.", "info");
+        })
         .catch(() => showToast("Could not remove that contact.", "error"));
-};
+}
 
 findChatsBtn.addEventListener('click', async () => {
     findChatsBtn.disabled = true;
@@ -1240,11 +1391,7 @@ demoWavButtons.forEach(btn => {
 
             if (data.verified) {
                 await logVerifiedEvent(data);
-            }
-            if (data.verified && data.should_alert) {
-                setTimeout(() => triggerAlertModal(data, wavBlob), 800);
-            } else if (data.verified && data.media_suppressed) {
-                lastEventDetails.innerText = "Verified demo sound recorded as likely media playback; no critical alert shown.";
+                setTimeout(() => handleVerifiedDetection(data, wavBlob), 800);
             }
         } catch (e) {
             showToast(`Sample injection failed: ${e.message}`, "error");

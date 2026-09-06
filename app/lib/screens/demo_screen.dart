@@ -124,14 +124,31 @@ class _DemoScreenState extends State<DemoScreen> {
       riskScore: (result['risk_score'] as num?)?.toInt() ?? 0,
       riskLevel: result['risk_level']?.toString() ?? 'NORMAL',
     );
+    // logEvent is a real network round-trip -- the user can switch tabs
+    // (fully disposing this State, via MainNavigationShell's KeyedSubtree)
+    // before it resolves. Every other await in this file already guards its
+    // following setState/Navigator/context use; this one didn't.
+    if (!mounted) return;
 
-    if (result['should_alert'] != true) {
+    // A moderate-confidence ("SUSPICIOUS") read is worth logging, not worth
+    // the full alert screen -- see docs/DECISIONS_LOG.md #10. The demo lab's
+    // curated clips normally land well into POSSIBLE_DANGER/HIGH_RISK, so
+    // this only changes behaviour for a genuinely borderline model output,
+    // which is exactly when NOT dramatizing the result is the honest call.
+    final riskLevel = result['risk_level']?.toString() ?? 'NORMAL';
+    final showFullAlert =
+        result['should_alert'] == true && (riskLevel == 'POSSIBLE_DANGER' || riskLevel == 'HIGH_RISK');
+
+    if (!showFullAlert) {
       final suppressed = result['media_suppressed'] == true;
       setState(() => _statusMessage = suppressed
           ? 'Verified as likely media playback (risk ${result['risk_score']}). No alert raised — '
               'this is the movie-scene false-positive defence.'
-          : 'Verified at risk ${result['risk_score']} (${result['risk_level']}) — below the '
-              'emergency-handoff threshold.');
+          : result['should_alert'] == true
+              ? 'Verified ${candidate.replaceAll('_', ' ')} at risk ${result['risk_score']} ($riskLevel) '
+                  '— logged, below the alert-screen threshold.'
+              : 'Verified at risk ${result['risk_score']} ($riskLevel) — below the '
+                  'emergency-handoff threshold.');
       return;
     }
 

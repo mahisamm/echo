@@ -1,3 +1,4 @@
+import glob
 import os
 import tempfile
 
@@ -102,5 +103,61 @@ def test_endpoints():
 
     print("\nAll Backend Endpoint Tests Passed Successfully!")
 
+
+_MODEL_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model", "data"))
+
+
+def _first_wav(class_name):
+    for source in ("processed", "synthetic"):
+        matches = sorted(glob.glob(os.path.join(_MODEL_DATA_DIR, source, class_name, "*.wav")))
+        if matches:
+            return matches[0]
+    return None
+
+
+def test_glass_breaking_gets_a_real_second_listen_not_gunshot_explosion():
+    """glass_breaking was removed from /detect's "immediate verification"
+    bypass (docs/DECISIONS_LOG.md #10): it is not in URGENT_HAZARDS and
+    should not skip a real Pass 2 re-listen just because gunshot/explosion
+    correctly do. Reusing one confidence value as both "primary" and
+    "verification" let a single ambiguous transient look independently
+    double-confirmed when it was only ever heard once -- this test locks in
+    that gunshot/explosion still get the fast (single-listen) path while
+    glass_breaking always gets sent to Pass 2."""
+    gunshot_path = _first_wav("gunshot")
+    glass_path = _first_wav("glass_breaking")
+    assert gunshot_path and glass_path, (
+        "No gunshot/glass_breaking WAV files available -- run prepare_dataset.py first."
+    )
+
+    with open(gunshot_path, "rb") as f:
+        response = client.post(
+            "/detect",
+            files={"file": ("clip.wav", f, "audio/wav")},
+            data={"duration": "2.0", "media_playback": "false", "sudden_motion": "false",
+                  "user_id": "gate_test_user"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    if data["has_candidate"] and data["candidate"] == "gunshot":
+        assert data["immediate_verification"] is True
+
+    with open(glass_path, "rb") as f:
+        response = client.post(
+            "/detect",
+            files={"file": ("clip.wav", f, "audio/wav")},
+            data={"duration": "2.0", "media_playback": "false", "sudden_motion": "false",
+                  "user_id": "gate_test_user"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    if data["has_candidate"] and data["candidate"] == "glass_breaking":
+        assert data["immediate_verification"] is False, (
+            "glass_breaking must go through a real Pass 2 re-listen, not the "
+            "gunshot/explosion fast path."
+        )
+
+
 if __name__ == "__main__":
     test_endpoints()
+    test_glass_breaking_gets_a_real_second_listen_not_gunshot_explosion()

@@ -409,13 +409,24 @@ def generate_metadata_csv():
             for wav in wav_files:
                 filename = os.path.basename(wav)
                 source_dataset = _source_dataset_for(filename)
-                split = _assign_split(_origin_id(filename))
-                # Save as absolute path so train.py can easily load it from any Cwd
+                origin_id = _origin_id(filename)
+                split = _assign_split(origin_id)
+                # source_clip_id is the ORIGIN id, not the per-variant filename:
+                # every augmented sibling of one real recording must share it, so
+                # data_manifest.py's leakage check (which groups rows by
+                # (source_dataset, source_clip_id) and flags any group that spans
+                # more than one split) can actually catch a real cross-split leak
+                # if _origin_id()'s regex ever regresses. A unique-per-row id here
+                # would make that check structurally unable to ever fire, silently
+                # passing even if augmented variants of one clip did end up split
+                # across train/test. Matches prepare_demo_dataset.py's clip_id
+                # pattern. Save filepath as absolute so train.py can load it from
+                # any cwd.
                 records.append({
                     "filepath": os.path.abspath(wav),
                     "label": c,
                     "source_dataset": source_dataset,
-                    "source_clip_id": filename,
+                    "source_clip_id": origin_id,
                     "split": split,
                 })
 

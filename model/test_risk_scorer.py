@@ -119,5 +119,44 @@ def test_risk_scorer():
     
     print("All Risk Scorer Unit Tests Passed Successfully!")
 
+
+def test_stale_history_does_not_contaminate_a_later_unrelated_score():
+    """A hazard sequence that has already aged out of the 10s lookback
+    window must not keep boosting later, unrelated scores just because
+    add_event()/prune_history() only ever ran together on a fresh hazard.
+    Reproduces the exact bug found in review: an hour-old hazard pair for
+    the same context_id silently turned a NORMAL read into SUSPICIOUS."""
+    scorer = RiskScorer()
+    an_hour_ago = time.time() - 3600
+    scorer.event_history["stale_user"] = [
+        {"timestamp": an_hour_ago, "class": "gunshot"},
+        {"timestamp": an_hour_ago + 1, "class": "scream"},
+    ]
+
+    score, level = scorer.calculate_risk(
+        primary_conf=0.35, verification_conf=0.35,
+        media_playback=False, sudden_motion=False,
+        current_class="normal", context_id="stale_user",
+    )
+    assert level == "NORMAL", f"stale history leaked into an unrelated score: {score} ({level})"
+    # The stale entries must actually be gone, not just outvoted this once.
+    assert scorer.event_history.get("stale_user", []) == []
+
+
+def test_event_history_entry_is_dropped_once_it_prunes_empty():
+    """A context that saw exactly one hazard event and nothing since must
+    not keep a permanent (even if empty) dict entry forever -- see
+    docs/DECISIONS_LOG.md #11."""
+    scorer = RiskScorer()
+    scorer.calculate_risk(0.9, 0.9, False, False, "gunshot", context_id="one_shot_user")
+    assert "one_shot_user" in scorer.event_history
+
+    long_after = time.time() + scorer.config["temporal_lookback_seconds"] + 1
+    scorer.prune_history(long_after, "one_shot_user")
+    assert "one_shot_user" not in scorer.event_history
+
+
 if __name__ == "__main__":
     test_risk_scorer()
+    test_stale_history_does_not_contaminate_a_later_unrelated_score()
+    test_event_history_entry_is_dropped_once_it_prunes_empty()
